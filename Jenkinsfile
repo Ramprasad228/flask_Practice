@@ -5,11 +5,11 @@ pipeline {
     string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'AWS region for ECR and SSM execution.')
     string(name: 'ECR_REPO', defaultValue: 'myflaskapp', description: 'ECR repository name.')
     string(name: 'APP_PORT', defaultValue: '5000', description: 'Port exposed by the Flask app inside Docker.')
-    string(name: 'EC2_INSTANCE_ID', defaultValue: '', description: 'EC2 instance ID. Must have SSM agent installed and an IAM instance profile with ECR/SSM permissions.')
-    string(name: 'EC2_PUBLIC_IP', defaultValue: '', description: 'Public IP or DNS name of the EC2 instance used for final health verification.')
+    string(name: 'EC2_INSTANCE_ID', defaultValue: 'i-0b6a0bbfb754d0f5f', description: 'EC2 instance ID. Must have SSM agent installed and an IAM instance profile with ECR/SSM permissions.')
+    string(name: 'EC2_PUBLIC_IP', defaultValue: '44.222.88.24', description: 'Public IP or DNS name of the EC2 instance used for final health verification.')
     string(name: 'MONGO_URI', defaultValue: 'mongodb://mongo_app:27017/student_db', description: 'MongoDB connection string used by the app inside EC2 network.')
-    string(name: 'SECRET_KEY', defaultValue: '', description: 'Flask SECRET_KEY to inject into the app container.')
-    string(name: 'MAIL_RECIPIENTS', defaultValue: 'dev-team@example.com', description: 'Email recipients for success/failure notifications.')
+    string(name: 'SECRET_KEY', defaultValue: 'local-dev-secret-key', description: 'Flask SECRET_KEY to inject into the app container.')
+    string(name: 'MAIL_RECIPIENTS', defaultValue: 'ramprasadk257@gmail.com', description: 'Email recipients for success/failure notifications.')
     string(name: 'AWS_CREDENTIAL_ID', defaultValue: '', description: 'Optional Jenkins AWS credential ID. Leave blank to use the Jenkins node/role IAM credentials instead.')
   }
 
@@ -141,22 +141,23 @@ pipeline {
 }
 
 def pushToEcr() {
-  ACCOUNT_ID = sh(script: "aws sts get-caller-identity --query Account --output text 2>/dev/null || true", returnStdout: true).trim()
-  if (!ACCOUNT_ID) {
+  def accountId = sh(script: "aws sts get-caller-identity --query Account --output text 2>/dev/null || true", returnStdout: true).trim()
+  if (!accountId) {
     error('AWS CLI is not authenticated. Configure Jenkins AWS credentials or attach an IAM role to the Jenkins agent before pushing to ECR.')
   }
 
-  ECR_URI = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-  env.ECR_URI = ECR_URI
-  env.REPO_URI = "${env.ECR_URI}/${ECR_REPO}"
+  def registry = "${accountId}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  def repoUri = "${registry}/${ECR_REPO}"
+  env.ECR_URI = registry
+  env.REPO_URI = repoUri
 
-  sh "echo 'ECR URI: ${env.ECR_URI}'"
+  sh "echo 'ECR URI: ${registry}'"
   sh "aws ecr describe-repositories --region ${AWS_REGION} --repository-names ${ECR_REPO} || aws ecr create-repository --region ${AWS_REGION} --repository-name ${ECR_REPO}"
-  sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${env.ECR_URI}"
+  sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${registry}"
 
-  IMAGE_REMOTE = "${env.REPO_URI}:${env.COMMIT_SHA}"
-  sh "docker tag ${ECR_REPO}:${env.COMMIT_SHA} ${IMAGE_REMOTE}"
-  sh "docker push ${IMAGE_REMOTE}"
+  def imageRemote = "${repoUri}:${env.COMMIT_SHA}"
+  sh "docker tag ${ECR_REPO}:${env.COMMIT_SHA} ${imageRemote}"
+  sh "docker push ${imageRemote}"
 }
 
 def deployToEc2ViaSsm() {
@@ -164,7 +165,7 @@ def deployToEc2ViaSsm() {
     error('ECR repository URI is empty. Ensure the ECR push stage completed successfully before deploying to EC2.')
   }
 
-  IMAGE_REMOTE = "${env.REPO_URI}:${env.COMMIT_SHA}"
+  def imageRemote = "${env.REPO_URI}:${env.COMMIT_SHA}"
 
   def appCommands = [
     'set -e',
@@ -176,8 +177,8 @@ def deployToEc2ViaSsm() {
     'sudo docker pull mongo:latest',
     'sudo docker run -d --name mongo_app --network app-network -p 27017:27017 -v mongo_data:/data/db mongo:latest',
     'sleep 10',
-    'sudo docker pull ' + IMAGE_REMOTE,
-    'sudo docker run -d --name app --network app-network -p ' + APP_PORT + ':5000 -e MONGO_URI=\'' + MONGO_URI + '\' -e SECRET_KEY=\'' + SECRET_KEY + '\' ' + IMAGE_REMOTE,
+    'sudo docker pull ' + imageRemote,
+    'sudo docker run -d --name app --network app-network -p ' + APP_PORT + ':5000 -e MONGO_URI=\'' + MONGO_URI + '\' -e SECRET_KEY=\'' + SECRET_KEY + '\' ' + imageRemote,
     'for i in $(seq 1 30); do HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:' + APP_PORT + '/health || echo 000); if [ "$HTTP_CODE" = "200" ]; then echo "App health check passed"; exit 0; fi; sleep 2; done; echo "App did not become healthy"; exit 1'
   ]
 
