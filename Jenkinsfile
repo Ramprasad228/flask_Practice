@@ -5,10 +5,10 @@ pipeline {
     AWS_REGION = "us-east-1"
     ECR_REPO = "my-flask-app"
     APP_PORT = "5000"
-    EC2_USER = "ec2-user"
-    EC2_PUBLIC_IP = "your-ec2-public-ip-here"
+    EC2_USER = "ubuntu"
+    EC2_PUBLIC_IP = "44.198.180.28"
     SSH_CREDENTIALS_ID = "ec2-ssh-key"
-    RECIPIENTS = "dev-team@example.com"
+    RECIPIENTS = "ramprasadk257@gmail.com"
   }
 
   stages {
