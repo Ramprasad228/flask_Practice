@@ -146,8 +146,9 @@ def pushToEcr() {
     error('AWS CLI is not authenticated. Configure Jenkins AWS credentials or attach an IAM role to the Jenkins agent before pushing to ECR.')
   }
 
-  ECR_URI = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-
+  ECR_URI = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  sh "echo 'ECR URI: ${ECR_URI}'"
+  env.ECR_URI = ECR_URI
   sh "aws ecr describe-repositories --region ${AWS_REGION} --repository-names ${ECR_REPO} || aws ecr create-repository --region ${AWS_REGION} --repository-name ${ECR_REPO}"
   sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${env.ECR_URI}"
 
