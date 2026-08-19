@@ -141,7 +141,11 @@ pipeline {
 }
 
 def pushToEcr() {
-  ACCOUNT_ID = sh(script: "aws sts get-caller-identity --query Account --output text", returnStdout: true).trim()
+  ACCOUNT_ID = sh(script: "aws sts get-caller-identity --query Account --output text 2>/dev/null || true", returnStdout: true).trim()
+  if (!ACCOUNT_ID) {
+    error('AWS CLI is not authenticated. Configure Jenkins AWS credentials or attach an IAM role to the Jenkins agent before pushing to ECR.')
+  }
+
   env.ECR_URI = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
 
   sh "aws ecr describe-repositories --region ${AWS_REGION} --repository-names ${ECR_REPO} || aws ecr create-repository --region ${AWS_REGION} --repository-name ${ECR_REPO}"
@@ -153,6 +157,10 @@ def pushToEcr() {
 }
 
 def deployToEc2ViaSsm() {
+  if (!env.ECR_URI?.trim()) {
+    error('ECR URI is empty. Ensure the ECR push stage completed successfully before deploying to EC2.')
+  }
+
   IMAGE_REMOTE = "${env.ECR_URI}:${env.COMMIT_SHA}"
 
   def appCommands = [
