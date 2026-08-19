@@ -23,8 +23,6 @@ pipeline {
     SECRET_KEY = "${params.SECRET_KEY}"
     RECIPIENTS = "${params.MAIL_RECIPIENTS}"
     AWS_CREDENTIAL_ID = "${params.AWS_CREDENTIAL_ID}"
-    COMMIT_SHA = ""
-    ECR_URI = ""
   }
 
   stages {
@@ -68,6 +66,7 @@ pipeline {
           IMAGE_LOCAL = "${ECR_REPO}:${COMMIT_SHA}"
           sh "docker build -t ${IMAGE_LOCAL} ."
           env.COMMIT_SHA = COMMIT_SHA
+          sh "echo env.COMMIT_SHA=${env.COMMIT_SHA}"
         }
       }
     }
