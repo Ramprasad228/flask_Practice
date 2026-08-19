@@ -117,8 +117,8 @@ pipeline {
               'sudo docker run -d --name mongo_app --network app-network -p 27017:27017 -v mongo_data:/data/db mongo:latest',
               'sleep 10',
               'sudo docker pull ' + IMAGE_REMOTE,
-              "sudo docker run -d --name app --network app-network -p ${APP_PORT}:5000 -e MONGO_URI='" + MONGO_URI + "' -e SECRET_KEY='" + SECRET_KEY + "' " + IMAGE_REMOTE,
-              "for i in \\$(seq 1 30); do HTTP_CODE=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${APP_PORT}/health || echo 000); if [ \\\"\\$HTTP_CODE\\\" = \\\"200\\\" ]; then echo 'App health check passed'; exit 0; fi; sleep 2; done; echo 'App did not become healthy'; exit 1"
+              "sudo docker run -d --name app --network app-network -p " + APP_PORT + ":5000 -e MONGO_URI='" + MONGO_URI + "' -e SECRET_KEY='" + SECRET_KEY + "' " + IMAGE_REMOTE,
+              "for i in \\$(seq 1 30); do HTTP_CODE=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:" + APP_PORT + "/health || echo 000); if [ \\\"\\$HTTP_CODE\\\" = \\\"200\\\" ]; then echo 'App health check passed'; exit 0; fi; sleep 2; done; echo 'App did not become healthy'; exit 1"
             ]
 
             def ssmJson = groovy.json.JsonOutput.toJson([commands: appCommands])
