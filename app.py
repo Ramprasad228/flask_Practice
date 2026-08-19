@@ -59,6 +59,12 @@ def delete_student(student_id):
     mongo.db.students.delete_one({"_id": ObjectId(student_id)})
     return redirect(url_for('index'))
 
+# Health check endpoint used by CI/CD deploy verification
+@app.route('/health')
+def health():
+    # Simple liveness check — returns 200 when the app is up
+    return ("OK", 200)
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", debug=True, port=5000)
 
