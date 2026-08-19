@@ -36,13 +36,20 @@ def mongo_is_available(uri):
         return False
 
 
-if mongo_is_available(app.config["MONGO_URI"]):
-    mongo = PyMongo(app)
-else:
+def build_mongo_instance(uri):
+    if mongo_is_available(uri):
+        return PyMongo(app)
+
     if mongomock is None:
         raise RuntimeError("MongoDB is unavailable and mongomock is not installed.")
+
+    parsed = urlparse(uri)
+    db_name = parsed.path.lstrip('/') or 'student_db'
     mock_client = mongomock.MongoClient()
-    mongo = SimpleNamespace(db=mock_client["student_db"])
+    return SimpleNamespace(db=mock_client[db_name])
+
+
+mongo = build_mongo_instance(app.config["MONGO_URI"])
 
 # Home page -> list students
 @app.route('/')

@@ -2,16 +2,34 @@ pipeline {
   agent any
 
   environment {
-    AWS_REGION = "us-east-1"            // override as needed
-    ECR_REPO = "my-flask-app"           // ECR repo name (create in AWS ECR beforehand)
-    RECIPIENTS = "dev-team@example.com" // email recipients for notifications
+    AWS_REGION = "us-east-1"
+    ECR_REPO = "my-flask-app"
     APP_PORT = "5000"
+    EC2_USER = "ec2-user"
+    EC2_PUBLIC_IP = "your-ec2-public-ip-here"
+    SSH_CREDENTIALS_ID = "ec2-ssh-key"
+    RECIPIENTS = "dev-team@example.com"
   }
 
   stages {
     stage('Checkout') {
       steps {
         checkout scm
+      }
+    }
+
+    stage('Prepare .env from Jenkins secrets') {
+      steps {
+        withCredentials([
+          string(credentialsId: 'mongo-uri', variable: 'MONGO_URI'),
+          string(credentialsId: 'secret-key', variable: 'SECRET_KEY')
+        ]) {
+          sh '''
+            set -e
+            printf '%s\n%s\n' "MONGO_URI=${MONGO_URI}" "SECRET_KEY=${SECRET_KEY}" > .env
+            echo "Generated .env file from Jenkins credentials"
+          '''
+        }
       }
     }
 
@@ -24,39 +42,34 @@ pipeline {
 
     stage('Test') {
       steps {
-        // Run pytest; any failure will abort the pipeline automatically
-        sh 'pytest -q'
+        sh 'python -m pytest -q'
       }
     }
 
-    stage('Build') {
+    stage('Build Docker image') {
       steps {
         script {
-          // Determine commit SHA (short)
-          COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          IMAGE_LOCAL = "${ECR_REPO}:${COMMIT_SHORT}"
+          COMMIT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          IMAGE_LOCAL = "${ECR_REPO}:${COMMIT_SHA}"
           sh "docker build -t ${IMAGE_LOCAL} ."
+          env.COMMIT_SHA = COMMIT_SHA
         }
       }
     }
 
     stage('Push to ECR') {
       steps {
-        // AWS credentials required: configure as Jenkins credentials (username/password style or access keys)
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+        withCredentials([
+          [$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
+        ]) {
           script {
-            // Ensure repository URI
             ACCOUNT_ID = sh(script: "aws sts get-caller-identity --query Account --output text", returnStdout: true).trim()
             ECR_URI = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-            // Login to ECR
+            env.ECR_URI = ECR_URI
             sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URI}"
-            // Create repo if not exists (idempotent if repo exists)
             sh "aws ecr describe-repositories --region ${AWS_REGION} --repository-names ${ECR_REPO} || aws ecr create-repository --region ${AWS_REGION} --repository-name ${ECR_REPO}"
-            // Tag and push
-            COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-            IMAGE_LOCAL = "${ECR_REPO}:${COMMIT_SHORT}"
-            IMAGE_REMOTE = "${ECR_URI}:${COMMIT_SHORT}"
-            sh "docker tag ${IMAGE_LOCAL} ${IMAGE_REMOTE}"
+            IMAGE_REMOTE = "${ECR_URI}:${env.COMMIT_SHA}"
+            sh "docker tag ${ECR_REPO}:${env.COMMIT_SHA} ${IMAGE_REMOTE}"
             sh "docker push ${IMAGE_REMOTE}"
           }
         }
@@ -64,73 +77,68 @@ pipeline {
     }
 
     stage('Deploy to EC2') {
-      environment {
-        // Set these as Jenkins credentials/parameters in your job
-        EC2_USER = "ec2-user"
-        EC2_HOST = "ec2-host.example.com"
-        SSH_CREDENTIALS_ID = "ec2-ssh-key" // Jenkins SSH private key credential id
-      }
       steps {
-        script {
-          COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          IMAGE_REMOTE = sh(script: "aws sts get-caller-identity --query Account --output text --output text | awk '{print $1}'", returnStdout: true).trim() + ".dkr.ecr." + AWS_REGION + ".amazonaws.com/${ECR_REPO}:${COMMIT_SHORT}"
-
-          // Use SSH private key stored in Jenkins credentials
-          withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIALS_ID, keyFileVariable: 'PEM', usernameVariable: 'SSH_USER')]) {
-            // Commands to run on EC2 to deploy the new container
+        withCredentials([
+          sshUserPrivateKey(credentialsId: env.SSH_CREDENTIALS_ID, keyFileVariable: 'PEM', usernameVariable: 'SSH_USER'),
+          string(credentialsId: 'mongo-uri', variable: 'MONGO_URI'),
+          string(credentialsId: 'secret-key', variable: 'SECRET_KEY')
+        ]) {
+          script {
+            IMAGE_REMOTE = "${env.ECR_URI}:${env.COMMIT_SHA}"
             def remoteCmds = """
               set -e
-              # Ensure docker is installed on the EC2 instance
+              docker pull mongo:latest
+              docker pull python:3.11-slim
+              docker rm -f mongo_app app || true
+              docker network inspect app-network >/dev/null 2>&1 || docker network create app-network
+
+              docker run -d --name mongo_app --network app-network -p 27017:27017 -v mongo_data:/data/db mongo:latest
+              sleep 10
+
               docker pull ${IMAGE_REMOTE}
-              # Stop and remove any running container named app
-              if [ \$(docker ps -aq -f name=app) ]; then
-                docker stop app || true
-                docker rm app || true
-              fi
-              # Run new container
-              docker run -d --name app -p ${APP_PORT}:5000 ${IMAGE_REMOTE}
-              # Wait a bit for app to initialize
-              sleep 5
-              # Check health endpoint locally on the instance
-              HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${APP_PORT}/health || echo "000")
-              if [ "${HTTP_CODE}" != "200" ]; then
-                echo "Health check failed with status ${HTTP_CODE}"
-                exit 1
-              fi
+              docker run -d --name app --network app-network -p ${APP_PORT}:5000 \\
+                -e MONGO_URI='mongodb://mongo_app:27017/student_db' \\
+                -e SECRET_KEY='${SECRET_KEY}' \\
+                ${IMAGE_REMOTE}
+
+              for i in \$(seq 1 30); do
+                HTTP_CODE=\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${APP_PORT}/health || echo 000)
+                if [ \"\$HTTP_CODE\" = \"200\" ]; then
+                  echo \"App health check passed\"
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              echo \"App did not become healthy\"
+              exit 1
             """
 
-            // Execute remote commands via ssh
-            sh "scp -o StrictHostKeyChecking=no -i $PEM /dev/null ${SSH_USER}@${EC2_HOST}:/tmp/jenkins_touch || true"
-            sh "ssh -o StrictHostKeyChecking=no -i $PEM ${SSH_USER}@${EC2_HOST} '${remoteCmds}'"
+            sh "ssh -o StrictHostKeyChecking=no -i \"$PEM\" ${SSH_USER}@${EC2_PUBLIC_IP} '${remoteCmds}'"
           }
         }
       }
     }
 
-    stage('Verify from Pipeline') {
+    stage('Verify via EC2 public IP') {
       steps {
-        script {
-          COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          IMAGE_REMOTE = sh(script: "aws sts get-caller-identity --query Account --output text", returnStdout: true).trim() + ".dkr.ecr." + AWS_REGION + ".amazonaws.com/${ECR_REPO}:${COMMIT_SHORT}"
-          // Verify the public/endpoint health — adjust to use instance public IP or load balancer DNS
-          sh "curl --fail -sS http://${EC2_HOST}:${APP_PORT}/health"
-        }
+        sh "curl --fail --silent --show-error http://${EC2_PUBLIC_IP}:${APP_PORT}/health"
       }
     }
   }
 
   post {
     success {
-      mail to: "${RECIPIENTS}", subject: "SUCCESS: Job ${env.JOB_NAME} [${env.BUILD_NUMBER}]", body: "Build and deploy succeeded. Image: ${ECR_REPO}:${env.GIT_COMMIT ?: 'unknown'}"
+      mail to: "${RECIPIENTS}", subject: "SUCCESS: Job ${env.JOB_NAME} [${env.BUILD_NUMBER}]", body: "Deployment succeeded. Image: ${env.ECR_URI}:${env.COMMIT_SHA}"
     }
     failure {
-      mail to: "${RECIPIENTS}", subject: "FAILURE: Job ${env.JOB_NAME} [${env.BUILD_NUMBER}]", body: "Build or deploy FAILED. See console output: ${env.BUILD_URL}"
+      mail to: "${RECIPIENTS}", subject: "FAILURE: Job ${env.JOB_NAME} [${env.BUILD_NUMBER}]", body: "Build or deployment failed. Console output: ${env.BUILD_URL}"
     }
     unstable {
-      mail to: "${RECIPIENTS}", subject: "UNSTABLE: Job ${env.JOB_NAME} [${env.BUILD_NUMBER}]", body: "Build unstable. See console output: ${env.BUILD_URL}"
+      mail to: "${RECIPIENTS}", subject: "UNSTABLE: Job ${env.JOB_NAME} [${env.BUILD_NUMBER}]", body: "Build is unstable. Console output: ${env.BUILD_URL}"
     }
     always {
-      // Archive Docker image id or similar artifacts if desired
+      sh 'rm -f .env'
     }
   }
 }
