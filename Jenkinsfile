@@ -3,13 +3,13 @@ pipeline {
 
   parameters {
     string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'AWS region for ECR and SSM execution.')
-    string(name: 'ECR_REPO', defaultValue: 'my-flask-app', description: 'ECR repository name.')
+    string(name: 'ECR_REPO', defaultValue: 'myflaskapp', description: 'ECR repository name.')
     string(name: 'APP_PORT', defaultValue: '5000', description: 'Port exposed by the Flask app inside Docker.')
-    string(name: 'EC2_INSTANCE_ID', defaultValue: 'i-0b6a0bbfb754d0f5f', description: 'EC2 instance ID. Must have SSM agent installed and an IAM instance profile with ECR/SSM permissions.')
-    string(name: 'EC2_PUBLIC_IP', defaultValue: '44.222.88.24', description: 'Public IP or DNS name of the EC2 instance used for final health verification.')
+    string(name: 'EC2_INSTANCE_ID', defaultValue: '', description: 'EC2 instance ID. Must have SSM agent installed and an IAM instance profile with ECR/SSM permissions.')
+    string(name: 'EC2_PUBLIC_IP', defaultValue: '', description: 'Public IP or DNS name of the EC2 instance used for final health verification.')
     string(name: 'MONGO_URI', defaultValue: 'mongodb://mongo_app:27017/student_db', description: 'MongoDB connection string used by the app inside EC2 network.')
-    string(name: 'SECRET_KEY', defaultValue: 'local-dev-secret-key', description: 'Flask SECRET_KEY to inject into the app container.')
-    string(name: 'MAIL_RECIPIENTS', defaultValue: 'ramprasadk257@gmail.com', description: 'Email recipients for success/failure notifications.')
+    string(name: 'SECRET_KEY', defaultValue: '', description: 'Flask SECRET_KEY to inject into the app container.')
+    string(name: 'MAIL_RECIPIENTS', defaultValue: 'dev-team@example.com', description: 'Email recipients for success/failure notifications.')
     string(name: 'AWS_CREDENTIAL_ID', defaultValue: '', description: 'Optional Jenkins AWS credential ID. Leave blank to use the Jenkins node/role IAM credentials instead.')
   }
 
@@ -147,22 +147,24 @@ def pushToEcr() {
   }
 
   ECR_URI = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-  sh "echo 'ECR URI: ${ECR_URI}'"
   env.ECR_URI = ECR_URI
+  env.REPO_URI = "${env.ECR_URI}/${ECR_REPO}"
+
+  sh "echo 'ECR URI: ${env.ECR_URI}'"
   sh "aws ecr describe-repositories --region ${AWS_REGION} --repository-names ${ECR_REPO} || aws ecr create-repository --region ${AWS_REGION} --repository-name ${ECR_REPO}"
   sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${env.ECR_URI}"
 
-  IMAGE_REMOTE = "${env.ECR_URI}:${env.COMMIT_SHA}"
+  IMAGE_REMOTE = "${env.REPO_URI}:${env.COMMIT_SHA}"
   sh "docker tag ${ECR_REPO}:${env.COMMIT_SHA} ${IMAGE_REMOTE}"
   sh "docker push ${IMAGE_REMOTE}"
 }
 
 def deployToEc2ViaSsm() {
-  if (!env.ECR_URI?.trim()) {
-    error('ECR URI is empty. Ensure the ECR push stage completed successfully before deploying to EC2.')
+  if (!env.REPO_URI?.trim()) {
+    error('ECR repository URI is empty. Ensure the ECR push stage completed successfully before deploying to EC2.')
   }
 
-  IMAGE_REMOTE = "${env.ECR_URI}:${env.COMMIT_SHA}"
+  IMAGE_REMOTE = "${env.REPO_URI}:${env.COMMIT_SHA}"
 
   def appCommands = [
     'set -e',
